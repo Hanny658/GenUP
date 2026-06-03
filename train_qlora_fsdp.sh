@@ -1,0 +1,11 @@
+ACCELERATE_USE_FSDP=1 FSDP_CPU_RAM_EFFICIENT_LOADING=1 torchrun --nproc_per_node=2 src/train_sft_qlora_fsdp.py \
+    --model_checkpoint "meta-llama/Meta-Llama-3.1-8B" \
+    --max_length 16384 \
+    --batch_size 2 \
+    --learning_rate 2e-4 \
+    --max_grad_norm 1.0 \
+    --warmup_steps 20 \
+    --num_epochs 3 \
+    --gradient_checkpointing \
+    --apply_liger_kernel_to_llama \
+    --dataset_id "w11wo/FourSquare-TKY-POI"
