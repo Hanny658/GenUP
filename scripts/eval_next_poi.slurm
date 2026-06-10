@@ -38,7 +38,11 @@ source scripts/lib_env.sh
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-genup}"
 CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-}"
+# Must match what prepare_env_data.slurm used so we find the env + share the HF
+# weight cache off $HOME.
+GENUP_CACHE_ROOT="${GENUP_CACHE_ROOT:-}"
 
+setup_caches
 init_modules
 init_conda
 # Fails loudly with "run prepare_env_data.slurm first" if the env was never built.

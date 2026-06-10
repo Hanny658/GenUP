@@ -107,8 +107,8 @@ verify_conda_env() {
 }
 
 # Create the env if missing, then VERIFY it really exists. `conda create` can
-# print errors to stdout and still leave you without an env on a node with no
-# internet; this turns that silent no-op into a hard, explained failure.
+# fail (no internet, or -- common on HPC -- a full $HOME quota) yet still leave a
+# confusing partial state; this turns that into a hard, explained failure.
 ensure_conda_env() {
     local target="${CONDA_ENV_PREFIX:-$CONDA_ENV_NAME}"
     if conda_env_exists; then
@@ -116,14 +116,21 @@ ensure_conda_env() {
         return 0
     fi
     log_stage "creating conda env '$target' (python=$CONDA_PYTHON_VERSION)"
+    # `|| ok=0` keeps conda's own non-zero exit from tripping the ERR trap so we
+    # can print a single, actionable message instead of a noisy double trace.
+    local ok=1
     if [[ -n "${CONDA_ENV_PREFIX:-}" ]]; then
-        conda create -y -p "$CONDA_ENV_PREFIX" "python=$CONDA_PYTHON_VERSION"
+        conda create -y -p "$CONDA_ENV_PREFIX" "python=$CONDA_PYTHON_VERSION" || ok=0
     else
-        conda create -y -n "$CONDA_ENV_NAME" "python=$CONDA_PYTHON_VERSION"
+        conda create -y -n "$CONDA_ENV_NAME" "python=$CONDA_PYTHON_VERSION" || ok=0
     fi
-    conda_env_exists || die "conda create finished but env '$target' is still missing. \
-This usually means package downloads failed -- compute nodes often have no internet. \
-Build the env on a login node (or a node with outbound HTTPS) before submitting."
+    if [[ "$ok" != "1" ]] || ! conda_env_exists; then
+        die "conda create failed for '$target'. Common HPC causes (see the conda traceback above):
+  * Disk quota exceeded on \$HOME -- conda writes envs+packages under ~/.conda. Free space
+    ('conda clean -a -y' then 'rm -rf ~/.conda/pkgs/*'), or set GENUP_CACHE_ROOT=/path/on/scratch
+    to put the env and all caches on a roomy filesystem, then rerun.
+  * No outbound internet on this compute node -- build the env on a login node instead."
+    fi
     log_done "conda env '$target' created"
 }
 
@@ -137,6 +144,29 @@ first and confirm its log shows '[done]  conda env ... created' (check the .out 
     activate_conda_env
     verify_conda_env
     log_done "conda env '$target' active"
+}
+
+# Redirect conda envs + package cache, pip cache, Hugging Face cache, and TMPDIR
+# off the (usually small, quota-limited) home directory onto a roomy filesystem.
+# Set GENUP_CACHE_ROOT=/path/on/scratch and this points everything there; leave
+# it unset for the original behaviour. Call BEFORE init_conda / ensure_conda_env
+# / require_conda_env, and set it consistently for prep AND train/eval so they
+# all agree on where the env lives (exporting it in ~/.bashrc is easiest).
+setup_caches() {
+    local root="${GENUP_CACHE_ROOT:-}"
+    [[ -z "$root" ]] && return 0
+    mkdir -p "$root/conda_pkgs" "$root/pip" "$root/hf" "$root/tmp" "$root/envs"
+    export CONDA_PKGS_DIRS="$root/conda_pkgs"     # where conda downloads/extracts + caches repodata
+    export PIP_CACHE_DIR="$root/pip"
+    export HF_HOME="$root/hf"                      # umbrella for hub/datasets/transformers caches
+    export HF_DATASETS_CACHE="$root/hf/datasets"
+    export HUGGINGFACE_HUB_CACHE="$root/hf/hub"
+    export TMPDIR="$root/tmp"
+    # Put the env under the cache root unless the caller pinned one explicitly.
+    if [[ -z "${CONDA_ENV_PREFIX:-}" ]]; then
+        export CONDA_ENV_PREFIX="$root/envs/${CONDA_ENV_NAME:-genup}"
+    fi
+    log_info "GENUP_CACHE_ROOT=$root -> env=$CONDA_ENV_PREFIX; conda/pip/HF/TMP caches redirected off \$HOME"
 }
 
 # Non-fatal connectivity probe so a no-internet node is flagged BEFORE a long,

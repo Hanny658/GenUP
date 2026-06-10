@@ -62,8 +62,13 @@ PROFILE_DATASET_ID="${PROFILE_DATASET_ID:-}"
 SFT_DATASET_ID="${SFT_DATASET_ID:-}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 
+# Set GENUP_CACHE_ROOT=/path/on/scratch to keep the env + conda/pip/HF caches off
+# the quota-limited $HOME (a full home quota is the usual cause of conda failures).
+GENUP_CACHE_ROOT="${GENUP_CACHE_ROOT:-}"
+
 log_info "job ${SLURM_JOB_ID:-local} on $(hostname) | dataset=$DATASET | install=$RUN_INSTALL profile=$RUN_PROFILE_GENERATION poi=$RUN_POI_REASONING sft=$RUN_CREATE_SFT_DATASET"
 
+setup_caches
 init_modules
 init_conda
 
