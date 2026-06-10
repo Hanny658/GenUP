@@ -18,13 +18,10 @@
 ### Specify Time Limit, format: <min> or <min>:<sec> or <hr>:<min>:<sec> or <days>-<hr>:<min>:<sec> or <days>-<hr> ###
 #SBATCH --time=06:00:00
 #
-#SBATCH --job-name=llm4poi_eval
+#SBATCH --job-name=genup_eval
 #SBATCH --output=log/%x-%j.out
 #SBATCH --error=log/%x-%j.err
 
-# Add cluster-specific SBATCH directives above if needed, for example:
-# #SBATCH --partition=gpu
-# #SBATCH --account=my_account
 
 set -euo pipefail
 
@@ -32,9 +29,45 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 mkdir -p log
 
-# Load your HPC environment here if needed, for example:
-# module load cuda/12.1
-# source .venv/bin/activate
+init_modules() {
+    if ! command -v module >/dev/null 2>&1; then
+        if [[ -f /etc/profile.d/modules.sh ]]; then
+            # shellcheck disable=SC1091
+            source /etc/profile.d/modules.sh
+        elif [[ -f /usr/share/Modules/init/bash ]]; then
+            # shellcheck disable=SC1091
+            source /usr/share/Modules/init/bash
+        fi
+    fi
+
+    module purge
+    module load gcc/14.2.0
+    module load cuda/12.8.0
+    module load miniconda3/25.5.1
+    module load slurm/slurm/24.11
+}
+
+init_conda() {
+    local conda_base
+    conda_base="$(conda info --base)"
+    # shellcheck disable=SC1090
+    source "$conda_base/etc/profile.d/conda.sh"
+}
+
+activate_conda_env() {
+    if [[ -n "$CONDA_ENV_PREFIX" ]]; then
+        conda activate "$CONDA_ENV_PREFIX"
+    else
+        conda activate "$CONDA_ENV_NAME"
+    fi
+}
+
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-genup}"
+CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-}"
+
+init_modules
+init_conda
+activate_conda_env
 
 MODEL_CHECKPOINT="${MODEL_CHECKPOINT:-meta-llama/Meta-Llama-3.1-8B}"
 DATASET_ID="${DATASET_ID:-w11wo/FourSquare-TKY-POI}"

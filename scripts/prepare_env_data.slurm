@@ -18,13 +18,9 @@
 ### Specify Time Limit, format: <min> or <min>:<sec> or <hr>:<min>:<sec> or <days>-<hr>:<min>:<sec> or <days>-<hr> ###
 #SBATCH --time=06:00:00
 #
-#SBATCH --job-name=llm4poi_env_prep
+#SBATCH --job-name=genup_env_prep
 #SBATCH --output=log/%x-%j.out
 #SBATCH --error=log/%x-%j.err
-
-# Add cluster-specific SBATCH directives above if needed, for example:
-# #SBATCH --partition=cpu
-# #SBATCH --account=my_account
 
 set -euo pipefail
 
@@ -32,14 +28,37 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 mkdir -p log
 
-# Load your HPC environment here if needed, for example:
-# module load python/3.10
+init_modules() {
+    if ! command -v module >/dev/null 2>&1; then
+        if [[ -f /etc/profile.d/modules.sh ]]; then
+            # shellcheck disable=SC1091
+            source /etc/profile.d/modules.sh
+        elif [[ -f /usr/share/Modules/init/bash ]]; then
+            # shellcheck disable=SC1091
+            source /usr/share/Modules/init/bash
+        fi
+    fi
+
+    module purge
+    module load gcc/14.2.0
+    module load cuda/12.8.0
+    module load miniconda3/25.5.1
+    module load slurm/slurm/24.11
+}
+
+init_conda() {
+    local conda_base
+    conda_base="$(conda info --base)"
+    # shellcheck disable=SC1090
+    source "$conda_base/etc/profile.d/conda.sh"
+}
 
 DATASET="${DATASET:-tky}"
 INPUT_PATH="${INPUT_PATH:-./LLM4POI}"
 OUTPUT_PATH="${OUTPUT_PATH:-./data}"
-VENV_DIR="${VENV_DIR:-.venv}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-genup}"
+CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-}"
+CONDA_PYTHON_VERSION="${CONDA_PYTHON_VERSION:-3.10}"
 
 RUN_INSTALL="${RUN_INSTALL:-1}"
 RUN_PROFILE_GENERATION="${RUN_PROFILE_GENERATION:-1}"
@@ -50,6 +69,33 @@ HF_NAMESPACE="${HF_NAMESPACE:-}"
 PROFILE_DATASET_ID="${PROFILE_DATASET_ID:-}"
 SFT_DATASET_ID="${SFT_DATASET_ID:-}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
+
+init_modules
+init_conda
+
+conda_env_exists() {
+    if [[ -n "$CONDA_ENV_PREFIX" ]]; then
+        [[ -d "$CONDA_ENV_PREFIX" ]]
+    else
+        conda env list | awk '{print $1}' | grep -qx "$CONDA_ENV_NAME"
+    fi
+}
+
+create_conda_env() {
+    if [[ -n "$CONDA_ENV_PREFIX" ]]; then
+        conda create -y -p "$CONDA_ENV_PREFIX" "python=$CONDA_PYTHON_VERSION"
+    else
+        conda create -y -n "$CONDA_ENV_NAME" "python=$CONDA_PYTHON_VERSION"
+    fi
+}
+
+activate_conda_env() {
+    if [[ -n "$CONDA_ENV_PREFIX" ]]; then
+        conda activate "$CONDA_ENV_PREFIX"
+    else
+        conda activate "$CONDA_ENV_NAME"
+    fi
+}
 
 dataset_base_name() {
     case "$1" in
@@ -70,16 +116,14 @@ if [[ -n "$HF_NAMESPACE" ]]; then
 fi
 
 if [[ "$RUN_INSTALL" == "1" ]]; then
-    if [[ ! -d "$VENV_DIR" ]]; then
-        "$PYTHON_BIN" -m venv "$VENV_DIR"
+    if ! conda_env_exists; then
+        create_conda_env
     fi
-    # shellcheck disable=SC1091
-    source "$VENV_DIR/bin/activate"
+    activate_conda_env
     python -m pip install --upgrade pip
     python -m pip install -r requirements.txt
-elif [[ -f "$VENV_DIR/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$VENV_DIR/bin/activate"
+else
+    activate_conda_env
 fi
 
 if [[ "$RUN_PROFILE_GENERATION" == "1" ]]; then
