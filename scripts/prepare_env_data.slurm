@@ -18,40 +18,32 @@
 ### Specify Time Limit, format: <min> or <min>:<sec> or <hr>:<min>:<sec> or <days>-<hr>:<min>:<sec> or <days>-<hr> ###
 #SBATCH --time=06:00:00
 #
-#SBATCH --job-name=genup_env_prep
+#SBATCH --job-name=env_prep_genup
 #SBATCH --output=log/%x-%j.out
 #SBATCH --error=log/%x-%j.err
 
-set -euo pipefail
+# NOTE: this job only installs packages and calls the OpenAI / Hugging Face APIs;
+# it does not need a GPU. If `conda create` / `pip install` fail here, the most
+# common reason is that this compute node has no outbound internet -- in that
+# case build the env on a login node first (see README) or pick a node with
+# network access.
+
+# -E so the ERR trap (installed in lib_env.sh) also fires inside functions.
+set -Eeuo pipefail
 
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 mkdir -p log
 
-init_modules() {
-    if ! command -v module >/dev/null 2>&1; then
-        if [[ -f /etc/profile.d/modules.sh ]]; then
-            # shellcheck disable=SC1091
-            source /etc/profile.d/modules.sh
-        elif [[ -f /usr/share/Modules/init/bash ]]; then
-            # shellcheck disable=SC1091
-            source /usr/share/Modules/init/bash
-        fi
-    fi
-
-    module purge
-    module load gcc/14.2.0
-    module load cuda/12.8.0
-    module load miniconda3/25.5.1
-    module load slurm/slurm/24.11
-}
-
-init_conda() {
-    local conda_base
-    conda_base="$(conda info --base)"
-    # shellcheck disable=SC1090
-    source "$conda_base/etc/profile.d/conda.sh"
-}
+# Load shared logging + conda/env helpers. Submit from the repo root so this
+# relative path resolves (Slurm runs a spooled copy of this script, so we cannot
+# source relative to the script's own location).
+if [[ ! -f scripts/lib_env.sh ]]; then
+    echo "[error] scripts/lib_env.sh not found; submit from the repo root: sbatch scripts/prepare_env_data.slurm" >&2
+    exit 1
+fi
+# shellcheck source=scripts/lib_env.sh
+source scripts/lib_env.sh
 
 DATASET="${DATASET:-tky}"
 INPUT_PATH="${INPUT_PATH:-./LLM4POI}"
@@ -70,32 +62,10 @@ PROFILE_DATASET_ID="${PROFILE_DATASET_ID:-}"
 SFT_DATASET_ID="${SFT_DATASET_ID:-}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 
+log_info "job ${SLURM_JOB_ID:-local} on $(hostname) | dataset=$DATASET | install=$RUN_INSTALL profile=$RUN_PROFILE_GENERATION poi=$RUN_POI_REASONING sft=$RUN_CREATE_SFT_DATASET"
+
 init_modules
 init_conda
-
-conda_env_exists() {
-    if [[ -n "$CONDA_ENV_PREFIX" ]]; then
-        [[ -d "$CONDA_ENV_PREFIX" ]]
-    else
-        conda env list | awk '{print $1}' | grep -qx "$CONDA_ENV_NAME"
-    fi
-}
-
-create_conda_env() {
-    if [[ -n "$CONDA_ENV_PREFIX" ]]; then
-        conda create -y -p "$CONDA_ENV_PREFIX" "python=$CONDA_PYTHON_VERSION"
-    else
-        conda create -y -n "$CONDA_ENV_NAME" "python=$CONDA_PYTHON_VERSION"
-    fi
-}
-
-activate_conda_env() {
-    if [[ -n "$CONDA_ENV_PREFIX" ]]; then
-        conda activate "$CONDA_ENV_PREFIX"
-    else
-        conda activate "$CONDA_ENV_NAME"
-    fi
-}
 
 dataset_base_name() {
     case "$1" in
@@ -115,58 +85,70 @@ if [[ -n "$HF_NAMESPACE" ]]; then
     SFT_DATASET_ID="${SFT_DATASET_ID:-$HF_NAMESPACE/${DATASET_BASE_NAME}-POI}"
 fi
 
+# ---------------------------------------------------------------------------
+# Stage: install dependencies
+# ---------------------------------------------------------------------------
 if [[ "$RUN_INSTALL" == "1" ]]; then
-    if ! conda_env_exists; then
-        create_conda_env
-    fi
+    warn_if_no_internet
+    ensure_conda_env
     activate_conda_env
+    verify_conda_env
+    log_stage "installing python dependencies"
     python -m pip install --upgrade pip
     python -m pip install -r requirements.txt
+    log_done "dependencies installed"
 else
-    activate_conda_env
+    require_conda_env
 fi
 
+# ---------------------------------------------------------------------------
+# Stage: generate user profiles (OpenAI)
+# ---------------------------------------------------------------------------
 if [[ "$RUN_PROFILE_GENERATION" == "1" ]]; then
-    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-        echo "OPENAI_API_KEY is required for profile generation." >&2
-        exit 1
-    fi
-    if [[ -z "$PROFILE_DATASET_ID" ]]; then
-        echo "Set HF_NAMESPACE or PROFILE_DATASET_ID before profile generation." >&2
-        exit 1
-    fi
+    log_stage "generating user profiles (dataset=$DATASET)"
+    [[ -n "${OPENAI_API_KEY:-}" ]] || die "OPENAI_API_KEY is required for profile generation."
+    [[ -n "$PROFILE_DATASET_ID" ]] || die "Set HF_NAMESPACE or PROFILE_DATASET_ID before profile generation."
+    train_csv="$INPUT_PATH/$DATASET/preprocessed/train_sample.csv"
+    [[ -f "$train_csv" ]] || die "input data not found: $train_csv (set INPUT_PATH or download the LLM4POI dataset)."
+    require_hf_auth
     python src/generate_user_profile.py \
         --input_path "$INPUT_PATH" \
         --output_path "$OUTPUT_PATH" \
         --dataset "$DATASET" \
         --dataset_id "$PROFILE_DATASET_ID" \
         --num_workers "$NUM_WORKERS"
+    log_done "user profiles generated -> $PROFILE_DATASET_ID"
 fi
 
+# ---------------------------------------------------------------------------
+# Stage: generate POI reasoning (OpenAI)
+# ---------------------------------------------------------------------------
 if [[ "$RUN_POI_REASONING" == "1" ]]; then
-    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-        echo "OPENAI_API_KEY is required for POI reasoning generation." >&2
-        exit 1
-    fi
-    if [[ -z "$SFT_DATASET_ID" ]]; then
-        echo "Set HF_NAMESPACE or SFT_DATASET_ID before POI reasoning generation." >&2
-        exit 1
-    fi
+    log_stage "generating POI reasoning (dataset=$DATASET)"
+    [[ -n "${OPENAI_API_KEY:-}" ]] || die "OPENAI_API_KEY is required for POI reasoning generation."
+    [[ -n "$SFT_DATASET_ID" ]] || die "Set HF_NAMESPACE or SFT_DATASET_ID before POI reasoning generation."
+    require_hf_auth
     python src/generate_poi_reasoning.py \
         --dataset_id "$SFT_DATASET_ID" \
         --output_path "$OUTPUT_PATH" \
         --dataset "$DATASET" \
         --num_workers "$NUM_WORKERS"
+    log_done "POI reasoning generated"
 fi
 
+# ---------------------------------------------------------------------------
+# Stage: build supervised fine-tuning dataset
+# ---------------------------------------------------------------------------
 if [[ "$RUN_CREATE_SFT_DATASET" == "1" ]]; then
-    if [[ -z "$SFT_DATASET_ID" ]]; then
-        echo "Set HF_NAMESPACE or SFT_DATASET_ID before SFT dataset creation." >&2
-        exit 1
-    fi
+    log_stage "creating SFT dataset (dataset=$DATASET)"
+    [[ -n "$SFT_DATASET_ID" ]] || die "Set HF_NAMESPACE or SFT_DATASET_ID before SFT dataset creation."
+    require_hf_auth
     python src/create_sft_dataset.py \
         --input_path "$INPUT_PATH" \
         --profiles_path "$OUTPUT_PATH" \
         --dataset "$DATASET" \
         --dataset_id "$SFT_DATASET_ID"
+    log_done "SFT dataset created -> $SFT_DATASET_ID"
 fi
+
+log_done "all requested env-prep stages complete"

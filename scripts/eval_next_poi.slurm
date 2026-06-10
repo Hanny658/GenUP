@@ -18,56 +18,31 @@
 ### Specify Time Limit, format: <min> or <min>:<sec> or <hr>:<min>:<sec> or <days>-<hr>:<min>:<sec> or <days>-<hr> ###
 #SBATCH --time=06:00:00
 #
-#SBATCH --job-name=genup_eval
+#SBATCH --job-name=eval_genup
 #SBATCH --output=log/%x-%j.out
 #SBATCH --error=log/%x-%j.err
 
-
-set -euo pipefail
+# -E so the ERR trap (installed in lib_env.sh) also fires inside functions.
+set -Eeuo pipefail
 
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 mkdir -p log
 
-init_modules() {
-    if ! command -v module >/dev/null 2>&1; then
-        if [[ -f /etc/profile.d/modules.sh ]]; then
-            # shellcheck disable=SC1091
-            source /etc/profile.d/modules.sh
-        elif [[ -f /usr/share/Modules/init/bash ]]; then
-            # shellcheck disable=SC1091
-            source /usr/share/Modules/init/bash
-        fi
-    fi
-
-    module purge
-    module load gcc/14.2.0
-    module load cuda/12.8.0
-    module load miniconda3/25.5.1
-    module load slurm/slurm/24.11
-}
-
-init_conda() {
-    local conda_base
-    conda_base="$(conda info --base)"
-    # shellcheck disable=SC1090
-    source "$conda_base/etc/profile.d/conda.sh"
-}
-
-activate_conda_env() {
-    if [[ -n "$CONDA_ENV_PREFIX" ]]; then
-        conda activate "$CONDA_ENV_PREFIX"
-    else
-        conda activate "$CONDA_ENV_NAME"
-    fi
-}
+if [[ ! -f scripts/lib_env.sh ]]; then
+    echo "[error] scripts/lib_env.sh not found; submit from the repo root: sbatch scripts/eval_next_poi.slurm" >&2
+    exit 1
+fi
+# shellcheck source=scripts/lib_env.sh
+source scripts/lib_env.sh
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-genup}"
 CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-}"
 
 init_modules
 init_conda
-activate_conda_env
+# Fails loudly with "run prepare_env_data.slurm first" if the env was never built.
+require_conda_env
 
 MODEL_CHECKPOINT="${MODEL_CHECKPOINT:-meta-llama/Meta-Llama-3.1-8B}"
 DATASET_ID="${DATASET_ID:-w11wo/FourSquare-TKY-POI}"
@@ -84,8 +59,7 @@ EVAL_REPETITION_PENALTY="${EVAL_REPETITION_PENALTY:-1.0}"
 EVAL_USE_QUANTIZATION="${EVAL_USE_QUANTIZATION:-0}"
 
 if [[ ! -f "$OUTPUT_DIR/.training_complete" ]]; then
-    echo "Warning: $OUTPUT_DIR/.training_complete not found; the model in" >&2
-    echo "$OUTPUT_DIR may be a mid-training checkpoint. Continuing anyway." >&2
+    log_warn "$OUTPUT_DIR/.training_complete not found; the model in $OUTPUT_DIR may be a mid-training checkpoint. Continuing anyway."
 fi
 
 mkdir -p results
@@ -95,6 +69,7 @@ if [[ "$EVAL_USE_QUANTIZATION" == "1" ]]; then
     eval_quantization_args+=(--use_quantization)
 fi
 
+log_stage "evaluating $OUTPUT_DIR on $EVAL_DATASET_ID"
 accelerate launch --num_processes=1 src/eval_next_poi.py \
     --model_checkpoint "$OUTPUT_DIR" \
     --dataset_id "$EVAL_DATASET_ID" \
@@ -105,3 +80,4 @@ accelerate launch --num_processes=1 src/eval_next_poi.py \
     --typical_p "$EVAL_TYPICAL_P" \
     --repetition_penalty "$EVAL_REPETITION_PENALTY" \
     "${eval_quantization_args[@]}"
+log_done "evaluation finished for $OUTPUT_DIR"

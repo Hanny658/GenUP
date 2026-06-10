@@ -24,7 +24,7 @@
 #SBATCH --signal=B:USR1@120
 #SBATCH --open-mode=append
 #
-#SBATCH --job-name=genup_train
+#SBATCH --job-name=train_genup
 #SBATCH --output=log/%x-%j.out
 #SBATCH --error=log/%x-%j.err
 
@@ -32,7 +32,8 @@
 # #SBATCH --partition=gpu
 # #SBATCH --account=my_account
 
-set -euo pipefail
+# -E so the ERR trap (installed in lib_env.sh) also fires inside functions.
+set -Eeuo pipefail
 
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
@@ -40,45 +41,20 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}"
 # too so anything the script writes (and a manual run) has somewhere to go.
 mkdir -p log
 
-init_modules() {
-    if ! command -v module >/dev/null 2>&1; then
-        if [[ -f /etc/profile.d/modules.sh ]]; then
-            # shellcheck disable=SC1091
-            source /etc/profile.d/modules.sh
-        elif [[ -f /usr/share/Modules/init/bash ]]; then
-            # shellcheck disable=SC1091
-            source /usr/share/Modules/init/bash
-        fi
-    fi
-
-    module purge
-    module load gcc/14.2.0
-    module load cuda/12.8.0
-    module load miniconda3/25.5.1
-    module load slurm/slurm/24.11
-}
-
-init_conda() {
-    local conda_base
-    conda_base="$(conda info --base)"
-    # shellcheck disable=SC1090
-    source "$conda_base/etc/profile.d/conda.sh"
-}
-
-activate_conda_env() {
-    if [[ -n "$CONDA_ENV_PREFIX" ]]; then
-        conda activate "$CONDA_ENV_PREFIX"
-    else
-        conda activate "$CONDA_ENV_NAME"
-    fi
-}
+if [[ ! -f scripts/lib_env.sh ]]; then
+    echo "[error] scripts/lib_env.sh not found; submit from the repo root: sbatch scripts/train_resume_single_gpu.slurm" >&2
+    exit 1
+fi
+# shellcheck source=scripts/lib_env.sh
+source scripts/lib_env.sh
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-genup}"
 CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-}"
 
 init_modules
 init_conda
-activate_conda_env
+# Fails loudly with "run prepare_env_data.slurm first" if the env was never built.
+require_conda_env
 
 # Help the 8B weights load without spiking CPU RAM (carried over from the original
 # train_qlora_fsdp.sh recipe). FSDP itself is configured via TrainingArguments.
@@ -129,17 +105,19 @@ run_training() {
 }
 
 if [[ -f "$COMPLETION_SENTINEL" ]]; then
-    echo "Training already complete (found $COMPLETION_SENTINEL); skipping."
-    echo "Run scripts/eval_next_poi.slurm to evaluate $OUTPUT_DIR."
+    log_info "Training already complete (found $COMPLETION_SENTINEL); skipping."
+    log_info "Run scripts/eval_next_poi.slurm to evaluate $OUTPUT_DIR."
     exit 0
 fi
+
+log_stage "training $MODEL_CHECKPOINT on $DATASET_ID -> $OUTPUT_DIR"
 
 if [[ "$AUTO_REQUEUE" == "1" && -n "${SLURM_JOB_ID:-}" ]]; then
     # On SIGUSR1 (sent 120s before walltime), requeue so the next run resumes from
     # the latest checkpoint. Run training in the background and `wait` so the trap
     # can interrupt it.
     requeue() {
-        echo "[requeue] walltime approaching; requeueing job $SLURM_JOB_ID"
+        log_info "[requeue] walltime approaching; requeueing job $SLURM_JOB_ID"
         scontrol requeue "$SLURM_JOB_ID"
         exit 0
     }
@@ -153,4 +131,4 @@ else
     run_training
 fi
 
-echo "Training finished. Run scripts/eval_next_poi.slurm to evaluate $OUTPUT_DIR."
+log_done "training finished. Run scripts/eval_next_poi.slurm to evaluate $OUTPUT_DIR."
