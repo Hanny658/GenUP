@@ -87,7 +87,13 @@ def main():
         bnb_4bit_quant_storage=torch_dtype,
     )
 
-    device_index = Accelerator().process_index
+    accelerator = Accelerator()
+    device_index = accelerator.process_index
+    # FSDP is only useful across multiple GPUs. With a single process it degrades to
+    # NO_SHARD and then can't flatten QLoRA's mixed-dtype params (bf16 quantized base
+    # + fp32 LoRA), raising "Must flatten tensors with uniform dtype". Gate it on the
+    # world size: multi-GPU -> FSDP, single-GPU -> plain QLoRA (fits an 8B model fine).
+    use_fsdp = accelerator.num_processes > 1
 
     model = AutoModelForCausalLM.from_pretrained(
         cli_args.model_checkpoint,
@@ -116,6 +122,19 @@ def main():
     if cli_args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
+    # Only pass FSDP settings when actually sharding across >1 GPU (see use_fsdp above);
+    # on a single GPU this dict stays empty so the Trainer runs plain (non-FSDP) QLoRA.
+    fsdp_args = {}
+    if use_fsdp:
+        fsdp_args = {
+            "fsdp": ["full_shard", "auto_wrap", "offload"],
+            "fsdp_config": {
+                "backward_prefetch": "backward_pre",
+                "forward_prefetch": "false",
+                "use_orig_params": "false",
+            },
+        }
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         save_strategy="steps",
@@ -133,12 +152,7 @@ def main():
         num_train_epochs=cli_args.num_epochs,
         optim="adamw_torch",
         report_to="tensorboard",
-        fsdp=["full_shard", "auto_wrap", "offload"],
-        fsdp_config={
-            "backward_prefetch": "backward_pre",
-            "forward_prefetch": "false",
-            "use_orig_params": "false",
-        },
+        **fsdp_args,
     )
 
     trainer = SFTTrainer(
