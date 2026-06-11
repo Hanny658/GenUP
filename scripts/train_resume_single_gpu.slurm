@@ -63,6 +63,10 @@ require_conda_env
 # Help the 8B weights load without spiking CPU RAM (carried over from the original
 # train_qlora_fsdp.sh recipe). FSDP itself is configured via TrainingArguments.
 export FSDP_CPU_RAM_EFFICIENT_LOADING="${FSDP_CPU_RAM_EFFICIENT_LOADING:-1}"
+# Silence the "tokenizers got forked after parallelism was used" warning (the
+# dataloader workers fork after the fast tokenizer has run) and avoid the rare
+# fork deadlock it warns about.
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
 MODEL_CHECKPOINT="${MODEL_CHECKPOINT:-meta-llama/Meta-Llama-3.1-8B}"
 DATASET_ID="${DATASET_ID:-w11wo/FourSquare-TKY-POI}"

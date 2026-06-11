@@ -145,7 +145,12 @@ def main():
         warmup_steps=cli_args.warmup_steps,
         per_device_train_batch_size=cli_args.batch_size,
         gradient_checkpointing=cli_args.gradient_checkpointing,
-        gradient_checkpointing_kwargs={"use_reentrant": True} if cli_args.gradient_checkpointing else None,
+        # use_reentrant=False: reentrant checkpointing runs a nested backward that
+        # re-fires DDP's reducer hooks, causing "marked as ready twice" on the LoRA
+        # params (torchrun always wraps the model in DDP, even on 1 GPU). The
+        # non-reentrant path uses saved-tensor hooks and fires each hook once; it is
+        # also correct under FSDP, so it is safe for both single- and multi-GPU.
+        gradient_checkpointing_kwargs={"use_reentrant": False} if cli_args.gradient_checkpointing else None,
         fp16=torch_dtype == torch.float16,
         bf16=torch_dtype == torch.bfloat16,
         dataloader_num_workers=cli_args.dataloader_num_workers,
