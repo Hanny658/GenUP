@@ -67,6 +67,11 @@ export FSDP_CPU_RAM_EFFICIENT_LOADING="${FSDP_CPU_RAM_EFFICIENT_LOADING:-1}"
 # dataloader workers fork after the fast tokenizer has run) and avoid the rare
 # fork deadlock it warns about.
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+# Reduce CUDA allocator fragmentation (the OOM message recommends exactly this).
+# Lets the allocator grow/shrink segments so "reserved but unallocated" memory can
+# be reused, which helps when an occasional long-sequence batch spikes activation
+# memory. Resume-safe: changes nothing about the model, data order, or step count.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 MODEL_CHECKPOINT="${MODEL_CHECKPOINT:-meta-llama/Meta-Llama-3.1-8B}"
 DATASET_ID="${DATASET_ID:-w11wo/FourSquare-TKY-POI}"
